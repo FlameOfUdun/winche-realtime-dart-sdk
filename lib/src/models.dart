@@ -79,6 +79,46 @@ final class RealtimeBatch {
   final String? state;
 }
 
+/// A message on a channel: who sent it, when, and its payload. Never kept.
+final class RealtimeMessage {
+  const RealtimeMessage({required this.path, required this.channel, required this.by, required this.at, required this.payload});
+
+  factory RealtimeMessage.fromWire(Map<String, dynamic> w) => RealtimeMessage(
+        path: w['path'] as String,
+        channel: w['channel'] as String,
+        by: w['by'] as String?,
+        at: DateTime.parse(w['at'] as String),
+        payload: base64Decode(w['payload'] as String),
+      );
+
+  final String path;
+  final String channel;
+  final String? by;
+  final DateTime at;
+  final Uint8List payload;
+
+  /// The payload read as JSON.
+  Object? get json => jsonDecode(utf8.decode(payload));
+}
+
+/// Someone connected at a path: who, what they said of themselves when they joined, since when.
+final class RealtimeMember {
+  const RealtimeMember({required this.uid, required this.data, required this.joinedAt});
+
+  factory RealtimeMember.fromWire(Map<String, dynamic> w) => RealtimeMember(
+        uid: w['uid'] as String?,
+        data: (w['data'] as Map<String, dynamic>?),
+        joinedAt: DateTime.parse(w['joinedAt'] as String),
+      );
+
+  static List<RealtimeMember> listFromWire(Object? members) =>
+      [for (final m in (members as List? ?? const [])) RealtimeMember.fromWire(m as Map<String, dynamic>)];
+
+  final String? uid;
+  final Map<String, dynamic>? data;
+  final DateTime joinedAt;
+}
+
 /// Why Winche Realtime refused or failed.
 final class WincheRealtimeException extends WincheException {
   const WincheRealtimeException(super.code, super.message, {this.reason});

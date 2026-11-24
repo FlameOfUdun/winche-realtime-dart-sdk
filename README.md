@@ -22,11 +22,29 @@ final page = await list.read(after: 100, limit: 500);
 await list.close();
 ```
 
+Channels and presence:
+
+```dart
+// Live messages at a path, never kept (telemetry a screen draws).
+final telemetry = WincheRealtime.instance.channel('sessions/s1', 'telemetry');
+telemetry.listen().listen((m) => draw(m.json));
+await telemetry.publishJson({'hr': 72});
+
+// Who's here; an item appended to the session's list if this connection drops without leaving.
+final here = WincheRealtime.instance.presence('sessions/s1');
+await here.join(data: {'role': 'nurse'}, onDisconnect: RealtimeItem.json('phone:dropped', {'event': 'dropped'}));
+here.watch().listen((members) => showWhoIsHere(members));
+await here.leave();
+```
+
 - **Keys** are yours, best as `device:sequence`: a project's rules can require the device part to be the caller.
 - **Payloads** are bytes the server never reads (`RealtimeItem.json` for JSON).
 - **One connection per app**, made when first needed, as the signed-in user, with the app's Integrity token. It
   reconnects by itself (waiting longer each failed try), sends again what a drop cut off, and resumes every
   subscription from the last position it delivered. When the sign-in expires, it reconnects with a fresh token.
+- **After a reconnect** it listens and watches again, and joins again what you'd joined. Messages sent while it was
+  disconnected are missed (channels keep nothing). A `publish` cut off by a drop fails as `unavailable`: it may or may
+  not have gone out, and is never sent twice.
 - **Nothing is kept on the device:** an app keeps what it needs (a list's last position, its own state).
 - Errors are `WincheRealtimeException` (a `WincheException`): `code` and `reason` (`denied`, `list-closed`,
   `key-reused`, `list-full`).

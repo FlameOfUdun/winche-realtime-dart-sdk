@@ -30,7 +30,7 @@ final class FakeRealtimeServer {
   Future<RealtimeSocket> connect(String? token) async {
     dials++;
     tokens.add(token);
-    final socket = FakeSocket(this);
+    final socket = FakeSocket(this)..uid = token;
     sockets.add(socket);
     scheduleMicrotask(() => socket._send({'type': 'welcome', 'connectionId': 'c$dials'}));
     return socket;
@@ -45,6 +45,9 @@ final class FakeRealtimeServer {
 
   /// The connection's sign-in expired: closed with 4401.
   void expire(FakeSocket socket) => socket._drop(4401);
+
+  /// Who's in each path's presence: connection → {uid, data, onDisconnect}.
+  final _presence = <String, Map<FakeSocket, Map<String, Object?>>>{};
 
   List<String> keysOf(String path) => (_lists[path]?.items ?? []).map((i) => i['key'] as String).toList();
 
@@ -94,6 +97,29 @@ final class FakeRealtimeServer {
       case 'unsubscribe':
         socket.subscriptions.remove(frame['subscription']);
         return reply(<String, Object?>{});
+      case 'publish':
+        for (final s in List.of(sockets)) {
+          for (final l in s.listens.entries.where((l) => l.value == '$path#${frame['channel']}').toList()) {
+            s._send({'type': 'message', 'subscription': l.key, 'path': path, 'channel': frame['channel'], 'by': socket.uid, 'at': DateTime.now().toUtc().toIso8601String(), 'payload': frame['payload']});
+          }
+        }
+        return reply(<String, Object?>{});
+      case 'listen':
+        socket.listens[id!] = '$path#${frame['channel']}';
+        return reply({'subscription': id});
+      case 'join':
+        (_presence[path!] ??= {})[socket] = {'uid': socket.uid, 'data': frame['data'], 'onDisconnect': frame['onDisconnect']};
+        reply(<String, Object?>{});
+        _presenceChanged(path);
+        return;
+      case 'leave':
+        _presence[path!]?.remove(socket);
+        reply(<String, Object?>{});
+        _presenceChanged(path);
+        return;
+      case 'watch':
+        socket.watches[id!] = path!;
+        return reply({'subscription': id, 'members': _members(path)});
       case 'open':
         final list = _lists.putIfAbsent(path!, () => _List(path));
         reply({'list': list.info});
@@ -107,6 +133,32 @@ final class FakeRealtimeServer {
         return;
       default:
         return fail('invalid-argument', 'Unknown request $type.');
+    }
+  }
+
+  List<Map<String, Object?>> _members(String path) => [
+        for (final m in (_presence[path] ?? {}).values) {'uid': m['uid'], 'data': m['data'], 'joinedAt': '2026-01-01T00:00:00Z'},
+      ];
+
+  void _presenceChanged(String path) {
+    for (final s in List.of(sockets)) {
+      for (final w in s.watches.entries.where((w) => w.value == path).toList()) {
+        s._send({'type': 'presence', 'subscription': w.key, 'path': path, 'members': _members(path)});
+      }
+    }
+  }
+
+  /// A connection ended: it leaves every presence set, its on-disconnect items appended.
+  void _gone(FakeSocket socket) {
+    for (final entry in _presence.entries.toList()) {
+      final member = entry.value.remove(socket);
+      if (member == null) continue;
+      if (member['onDisconnect'] case final Map<String, dynamic> od) {
+        final list = _lists.putIfAbsent(entry.key, () => _List(entry.key));
+        list.items.add({'key': od['key'], 'position': list.items.length + 1, 'at': DateTime.now().toUtc().toIso8601String(), 'by': member['uid'], 'payload': od['payload']});
+        _changed(entry.key);
+      }
+      _presenceChanged(entry.key);
     }
   }
 
@@ -157,6 +209,8 @@ final class FakeSocket implements RealtimeSocket {
   final FakeRealtimeServer _server;
   final _incoming = StreamController<String>();
   final subscriptions = <String, _Sub>{};
+  final listens = <String, String>{};
+  final watches = <String, String>{};
   int? _closeCode;
   String? uid;
 
@@ -188,6 +242,7 @@ final class FakeSocket implements RealtimeSocket {
     _closeCode = code;
     _server.sockets.remove(this);
     _incoming.close();
+    _server._gone(this);
   }
 }
 

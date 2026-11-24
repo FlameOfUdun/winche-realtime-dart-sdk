@@ -66,6 +66,29 @@ void main() {
     await expectLater(as('bob').list('other/x').append([RealtimeItem.json('bob:1', 1)]), throwsA(isA<WincheRealtimeException>()));
     await expectLater(bob.append([RealtimeItem('bob:3', utf8.encode('x'))]), throwsA(isA<WincheRealtimeException>()));
   }, skip: skip);
+
+  test('channels and presence against the server', () async {
+    final path = 'sessions/e2e-live-$run';
+    final heard = <String>[];
+    final listening = as('bob').channel(path, 'telemetry').listen().listen((m) => heard.add('${m.by}:${m.json}'));
+    final members = <List<String?>>[];
+    final watching = as('host').presence(path).watch().listen((m) => members.add(m.map((x) => x.uid).toList()));
+    await _until(() => members.isNotEmpty);
+    await Future<void>.delayed(const Duration(milliseconds: 200));   // the listen reached the server
+
+    final annConnection = as('ann');
+    await annConnection.channel(path, 'telemetry').publishJson({'hr': 72});
+    await _until(() => heard.length == 1);
+    expect(heard.single, 'ann:{hr: 72}');
+
+    await annConnection.presence(path).join(data: {'role': 'nurse'}, onDisconnect: RealtimeItem.json('ann:dropped', {'event': 'dropped'}));
+    await _until(() => members.last.contains('ann'));
+    await annConnection.dispose();   // the connection ends without leaving
+    await _until(() => !members.last.contains('ann'));
+    expect((await as('host').list(path).read()).items.single.key, 'ann:dropped');
+    await listening.cancel();
+    await watching.cancel();
+  }, skip: skip);
 }
 
 Future<void> _until(bool Function() done) async {

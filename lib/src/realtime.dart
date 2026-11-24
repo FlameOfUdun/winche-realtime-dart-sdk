@@ -35,6 +35,12 @@ final class WincheRealtime extends WincheService implements WincheSessionConsume
   /// The list at [path] (e.g. `sessions/s1`). Throws [WincheUnboundException] when nobody is signed in.
   RealtimeListRef list(String path) => (_connection ?? (throw WincheUnboundException())).list(path);
 
+  /// The channel [name] at [path] (live messages, never kept). Throws [WincheUnboundException] when nobody is signed in.
+  RealtimeChannelRef channel(String path, String name) => (_connection ?? (throw WincheUnboundException())).channel(path, name);
+
+  /// Who's connected at [path]. Throws [WincheUnboundException] when nobody is signed in.
+  RealtimePresenceRef presence(String path) => (_connection ?? (throw WincheUnboundException())).presence(path);
+
   @override
   Future<void> onSessionChanged(WincheSession? session) async {
     final previous = _connection;

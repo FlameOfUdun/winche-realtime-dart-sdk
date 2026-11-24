@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 import 'package:winche_core/winche_core.dart';
@@ -33,9 +34,17 @@ final class RealtimeConnection {
   Duration? _backoff;
   final _pending = <String, _Request>{};
   final _subscriptions = <String, _Subscription>{};
+  final _lives = <String, _Live>{};
+  final _joins = <String, Map<String, Object?>>{};
 
   /// The list at [path].
   RealtimeListRef list(String path) => RealtimeListRef._(this, path);
+
+  /// The channel [name] at [path]: live messages, never kept.
+  RealtimeChannelRef channel(String path, String name) => RealtimeChannelRef._(this, path, name);
+
+  /// Who's connected at [path].
+  RealtimePresenceRef presence(String path) => RealtimePresenceRef._(this, path);
 
   /// Closes the connection; requests in progress fail, subscriptions end.
   Future<void> dispose() async {
@@ -49,6 +58,11 @@ final class RealtimeConnection {
       await s.controller.close();
     }
     _subscriptions.clear();
+    for (final l in _lives.values.toList()) {
+      await l.controller.close();
+    }
+    _lives.clear();
+    _joins.clear();
     await _socket?.close();
     _socket = null;
   }
@@ -127,9 +141,9 @@ final class RealtimeConnection {
   /// Connected again: what was cut off is sent again (keys make appends safe to repeat), and each subscription
   /// starts again after the last position it delivered.
   void _resume() {
-    // Subscriptions are asked for again below, from where they got to: their old requests go.
-    for (final id in _pending.entries.where((e) => e.value.frame['type'] == 'subscribe').map((e) => e.key).toList()) {
-      _pending.remove(id)?.fail(const WincheRealtimeException(WincheErrorCode.unavailable, 'Resubscribing.'));
+    // Subscriptions, listens and watches are asked for again below (from where they got to): their old requests go.
+    for (final id in _pending.entries.where((e) => const {'subscribe', 'listen', 'watch'}.contains(e.value.frame['type'])).map((e) => e.key).toList()) {
+      _pending.remove(id)?.fail(const WincheRealtimeException(WincheErrorCode.unavailable, 'Asking again.'));
     }
     for (final r in _pending.values) {
       _sendIfOpen(r.frame);
@@ -138,6 +152,15 @@ final class RealtimeConnection {
       s.serverId = null;
       _subscribe(s);
     }
+    for (final l in _lives.values) {
+      l.serverId = null;
+      _startLive(l);
+    }
+    // The server took us out of presence when the connection ended: back in, unless that join is being sent anyway.
+    final joining = _pending.values.where((r) => r.frame['type'] == 'join').map((r) => r.frame['path']).toSet();
+    for (final MapEntry(key: path, value: frame) in _joins.entries) {
+      if (!joining.contains(path)) request(frame).ignore();
+    }
   }
 
   void _onClosed(RealtimeSocket socket) {
@@ -145,8 +168,12 @@ final class RealtimeConnection {
     _socket = null;
     _connected = null;
     if (socket.closeCode == 4401) _refreshToken = true;   // the sign-in expired: a fresh token next time
+    // A message cut off may have gone out or not, and has no key to stop a second copy: it fails, never resent.
+    for (final id in _pending.entries.where((e) => e.value.frame['type'] == 'publish').map((e) => e.key).toList()) {
+      _pending.remove(id)?.fail(const WincheRealtimeException(WincheErrorCode.unavailable, 'The connection dropped while publishing: it may or may not have gone out.'));
+    }
     if (_disposed) return;
-    if (_pending.isNotEmpty || _subscriptions.isNotEmpty) unawaited(_ensure().catchError((Object _) {}));
+    if (_pending.isNotEmpty || _subscriptions.isNotEmpty || _lives.isNotEmpty || _joins.isNotEmpty) unawaited(_ensure().catchError((Object _) {}));
   }
 
   void _onFrame(String text, Completer<void> welcomed) {
@@ -170,7 +197,13 @@ final class RealtimeConnection {
             s.serverId = null;
             _subscribe(s);
           }
+          for (final l in _lives.values.where((l) => l.serverId == sub)) {
+            l.serverId = null;
+            _startLive(l);
+          }
         }
+      case 'message' || 'presence':
+        _lives.values.where((l) => l.serverId == frame['subscription']).firstOrNull?.onEvent(frame);
       case 'items':
         final s = _subscriptions.values.where((s) => s.serverId == frame['subscription']).firstOrNull;
         if (s == null) return;
@@ -208,6 +241,44 @@ final class RealtimeConnection {
     );
     s = _Subscription('s${++_next}', path, after, controller);
     return controller.stream;
+  }
+
+  /// A live stream (listening on a channel, watching presence): asked for when listened to, again after each
+  /// reconnect; cancelled when its listener cancels.
+  Stream<T> _live<T>(Map<String, Object?> frame, void Function(_Live, Map<String, dynamic>) onResponse, void Function(_Live, Map<String, dynamic>) onEvent) {
+    late final _Live live;
+    final controller = StreamController<T>(
+      onListen: () {
+        _lives[live.local] = live;
+        _startLive(live);
+      },
+      onCancel: () {
+        _lives.remove(live.local);
+        final serverId = live.serverId;
+        if (serverId != null && _socket != null) request({'type': 'unsubscribe', 'subscription': serverId}).ignore();
+      },
+    );
+    live = _Live('l${++_next}', frame, controller, onResponse, onEvent);
+    return controller.stream;
+  }
+
+  void _startLive(_Live l) {
+    final attempt = ++l.attempt;
+    final id = 'r${++_next}';
+    l.serverId = id;
+    final r = _Request(id, {...l.frame, 'id': id});
+    _pending[id] = r;
+    r.completer.future.then((result) {
+      if (attempt == l.attempt) l.respond(l, result);
+    }, onError: (Object e) {
+      if (attempt != l.attempt || !_lives.containsKey(l.local)) return;
+      if (e is WincheRealtimeException && !e.isTransient) {
+        _lives.remove(l.local);
+        l.controller.addError(e);
+        l.controller.close();
+      }
+    });
+    _sendOrConnect(r.frame);
   }
 
   void _subscribe(_Subscription s) {
@@ -300,3 +371,69 @@ final class _Subscription {
 }
 
 Duration _min(Duration a, Duration b) => a < b ? a : b;
+
+/// A channel at a path: publish to it, listen on it. Messages are never kept.
+final class RealtimeChannelRef {
+  RealtimeChannelRef._(this._connection, this.path, this.name);
+
+  final RealtimeConnection _connection;
+  final String path;
+  final String name;
+
+  /// Publishes [payload] to everyone listening now. A publish cut off by a drop fails as `unavailable` (it may or may
+  /// not have gone out) and is never sent twice.
+  Future<void> publish(Uint8List payload) async {
+    await _connection.request({'type': 'publish', 'path': path, 'channel': name, 'payload': base64Encode(payload)});
+  }
+
+  /// Publishes [value] as JSON.
+  Future<void> publishJson(Object? value) => publish(Uint8List.fromList(utf8.encode(jsonEncode(value))));
+
+  /// Messages from now on, through reconnects (those sent while disconnected are missed: channels keep nothing).
+  Stream<RealtimeMessage> listen() => _connection._live<RealtimeMessage>(
+        {'type': 'listen', 'path': path, 'channel': name},
+        (_, _) {},
+        (l, frame) => l.controller.add(RealtimeMessage.fromWire(frame)),
+      );
+}
+
+/// Presence at a path: join it, leave it, watch who's there.
+final class RealtimePresenceRef {
+  RealtimePresenceRef._(this._connection, this.path);
+
+  final RealtimeConnection _connection;
+  final String path;
+
+  /// Joins, saying [data] (JSON, up to 1 KB) of yourself. If the connection ends without [leave], [onDisconnect] is
+  /// appended to the path's list, as you. After a reconnect you're joined again by yourself.
+  Future<void> join({Map<String, Object?>? data, RealtimeItem? onDisconnect}) async {
+    final frame = <String, Object?>{'type': 'join', 'path': path, 'data': ?data, if (onDisconnect != null) 'onDisconnect': onDisconnect.toWire()};
+    _connection._joins[path] = frame;
+    await _connection.request(frame);
+  }
+
+  /// Leaves on purpose: out, nothing appended, and not joined again after a reconnect.
+  Future<void> leave() async {
+    _connection._joins.remove(path);
+    await _connection.request({'type': 'leave', 'path': path});
+  }
+
+  /// Who's here now, then again each time that changes, through reconnects.
+  Stream<List<RealtimeMember>> watch() => _connection._live<List<RealtimeMember>>(
+        {'type': 'watch', 'path': path},
+        (l, result) => l.controller.add(RealtimeMember.listFromWire(result['members'])),
+        (l, frame) => l.controller.add(RealtimeMember.listFromWire(frame['members'])),
+      );
+}
+
+final class _Live {
+  _Live(this.local, this.frame, this.controller, this.respond, this.event);
+  final String local;
+  final Map<String, Object?> frame;
+  final StreamController<dynamic> controller;
+  final void Function(_Live, Map<String, dynamic>) respond;
+  final void Function(_Live, Map<String, dynamic>) event;
+  String? serverId;
+  int attempt = 0;
+  void onEvent(Map<String, dynamic> frame) => event(this, frame);
+}
