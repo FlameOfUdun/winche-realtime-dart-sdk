@@ -1,0 +1,3 @@
+tags:
+  server:
+    # End to end against a real server: needs WINCHE_REALTIME_URL (see test/server_test.dart).

@@ -1,0 +1,22 @@
+name: winche_realtime
+description: Dart client for Winche Realtime — ordered, append-only lists that devices write to and follow live, catching up after a reconnect.
+version: 0.1.0
+repository: https://github.com/FlameOfUdun/winche-realtime-dart-sdk
+issue_tracker: https://github.com/FlameOfUdun/winche-realtime-dart-sdk/issues
+
+topics:
+  - realtime
+  - websocket
+  - events
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  winche_core: ^1.1.0
+  web_socket_channel: ^3.0.0
+  meta: ^1.15.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^5.0.0
