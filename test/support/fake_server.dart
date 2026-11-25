@@ -26,12 +26,24 @@ final class FakeRealtimeServer {
   /// Requests seen, by type.
   final requests = <String, int>{};
 
+  /// The next this many connections close (with [closeBeforeWelcomeCode]) before the server says welcome.
+  int closeBeforeWelcome = 0;
+  int closeBeforeWelcomeCode = 1006;
+
+  /// Connections still open (not dropped or closed), whether they were welcomed or not.
+  int get open => sockets.length;
+
   /// A connector for [RealtimeConnection]: a new socket into this server.
   Future<RealtimeSocket> connect(String? token) async {
     dials++;
     tokens.add(token);
     final socket = FakeSocket(this)..uid = token;
     sockets.add(socket);
+    if (closeBeforeWelcome > 0) {
+      closeBeforeWelcome--;
+      scheduleMicrotask(() => socket._drop(closeBeforeWelcomeCode));
+      return socket;
+    }
     scheduleMicrotask(() => socket._send({'type': 'welcome', 'connectionId': 'c$dials'}));
     return socket;
   }
@@ -212,7 +224,11 @@ final class FakeSocket implements RealtimeSocket {
   final listens = <String, String>{};
   final watches = <String, String>{};
   int? _closeCode;
+  bool _hung = false;
   String? uid;
+
+  /// The connection goes quiet without closing (half-open, as after a network switch): nothing in, nothing out.
+  void hang() => _hung = true;
 
   @override
   Stream<String> get messages => _incoming.stream;
@@ -222,7 +238,7 @@ final class FakeSocket implements RealtimeSocket {
 
   @override
   void send(String text) {
-    if (_closeCode != null) return;
+    if (_closeCode != null || _hung) return;
     final frame = jsonDecode(text) as Map<String, dynamic>;
     scheduleMicrotask(() { if (_closeCode == null) _server._handle(this, frame); });
   }
@@ -231,7 +247,7 @@ final class FakeSocket implements RealtimeSocket {
   Future<void> close([int? code]) async => _drop(code ?? 1000);
 
   void _send(Map<String, Object?> frame) {
-    if (_closeCode != null) return;
+    if (_closeCode != null || _hung) return;
     final text = jsonEncode(frame);
     _incoming.add(text);
     if (_server.duplicateFrames) _incoming.add(text);

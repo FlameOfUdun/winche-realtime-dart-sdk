@@ -12,11 +12,11 @@ void main() {
   late FakeRealtimeServer server;
   final connections = <RealtimeConnection>[];
 
-  RealtimeConnection connect({Future<String?> Function({bool forceRefresh})? token}) {
+  RealtimeConnection connect({Future<String?> Function({bool forceRefresh})? token, WincheRealtimeSettings? settings}) {
     final c = RealtimeConnection(
       connector: (t) => server.connect(t),
       token: token ?? ({bool forceRefresh = false}) async => 'token',
-      settings: const WincheRealtimeSettings(initialBackoff: Duration(milliseconds: 5), maxBackoff: Duration(milliseconds: 40)),
+      settings: settings ?? const WincheRealtimeSettings(initialBackoff: Duration(milliseconds: 5), maxBackoff: Duration(milliseconds: 40)),
     );
     connections.add(c);
     return c;
@@ -147,6 +147,38 @@ void main() {
     for (final s in subs) {
       await s.cancel();
     }
+  });
+
+  for (final code in [1006, 4401]) {
+    test('a socket that closes before its welcome ($code) is let go: one connection, joined once', () async {
+      server.closeBeforeWelcome = 1;
+      server.closeBeforeWelcomeCode = code;
+      // A short welcome timeout: a dial left waiting on the closed socket would give up and dial a second one.
+      final ann = connect(settings: const WincheRealtimeSettings(
+          requestTimeout: Duration(milliseconds: 150), initialBackoff: Duration(milliseconds: 5), maxBackoff: Duration(milliseconds: 40)));
+      await ann.presence('sessions/s1').join();
+      await ann.list('sessions/s1').append([item('ann:1')]);
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(server.dials, 2);
+      expect(server.open, 1);   // no second, hidden connection
+      expect(server.requests['join'], 1);
+      if (code == 4401) expect(server.tokens, ['token', 'token']);
+    });
+  }
+
+  test('a connection that goes quiet without closing is noticed by its pings and replaced', () async {
+    final watcher = connect(settings: const WincheRealtimeSettings(
+        initialBackoff: Duration(milliseconds: 5), maxBackoff: Duration(milliseconds: 40),
+        pingInterval: Duration(milliseconds: 50), pingTimeout: Duration(milliseconds: 50)));
+    final seen = <String>[];
+    final sub = watcher.list('sessions/s1').subscribe().listen((b) => seen.addAll(b.items.map((e) => e.key)));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    server.sockets.single.hang();
+    await connect().list('sessions/s1').append([item('ann:1')]);
+    await _until(() => seen.isNotEmpty, within: const Duration(seconds: 3));
+    expect(seen, ['ann:1']);
+    expect(server.dials, greaterThanOrEqualTo(3));   // the watcher dialled again
+    await sub.cancel();
   });
 }
 

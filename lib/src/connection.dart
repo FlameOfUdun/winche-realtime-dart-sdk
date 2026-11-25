@@ -28,6 +28,8 @@ final class RealtimeConnection {
 
   RealtimeSocket? _socket;
   Completer<void>? _connected;
+  Timer? _pings;
+  DateTime _lastHeard = DateTime.now();
   bool _disposed = false;
   bool _refreshToken = false;
   int _next = 0;
@@ -63,6 +65,7 @@ final class RealtimeConnection {
     }
     _lives.clear();
     _joins.clear();
+    _pings?.cancel();
     await _socket?.close();
     _socket = null;
   }
@@ -124,10 +127,26 @@ final class RealtimeConnection {
         }
         _socket = socket;
         final welcomed = Completer<void>();
-        socket.messages.listen((text) => _onFrame(text, welcomed), onDone: () => _onClosed(socket), cancelOnError: true);
-        await welcomed.future.timeout(settings.requestTimeout);
+        void gone() {
+          if (!welcomed.isCompleted) {
+            // Closed before the welcome: this dial failed (its loop tries again); nothing else is started.
+            if (socket.closeCode == 4401) _refreshToken = true;
+            welcomed.completeError(const WincheRealtimeException(WincheErrorCode.unavailable, 'Closed before the welcome.'));
+            return;
+          }
+          _onClosed(socket);
+        }
+        socket.messages.listen((text) => _onFrame(socket, text, welcomed), onDone: gone, onError: (Object _) => gone(), cancelOnError: true);
+        try {
+          await welcomed.future.timeout(settings.requestTimeout);
+        } catch (_) {
+          if (identical(_socket, socket)) _socket = null;
+          unawaited(socket.close().catchError((Object _) {}));
+          rethrow;
+        }
         _backoff = null;
         connected.complete();
+        _startPings(socket);
         _resume();
         return;
       } catch (_) {
@@ -163,8 +182,27 @@ final class RealtimeConnection {
     }
   }
 
+  /// Pings a quiet connection; one that stays quiet is dropped (and replaced) as though it had closed.
+  void _startPings(RealtimeSocket socket) {
+    _pings?.cancel();
+    _lastHeard = DateTime.now();
+    final tick = settings.pingTimeout ~/ 2;
+    _pings = Timer.periodic(tick > Duration.zero ? tick : const Duration(milliseconds: 1), (timer) {
+      if (!identical(socket, _socket)) return timer.cancel();
+      final quiet = DateTime.now().difference(_lastHeard);
+      if (quiet > settings.pingInterval + settings.pingTimeout) {
+        timer.cancel();
+        _onClosed(socket);
+        unawaited(socket.close().catchError((Object _) {}));
+      } else if (quiet >= settings.pingInterval) {
+        socket.send(jsonEncode({'type': 'ping', 'id': 'ping'}));
+      }
+    });
+  }
+
   void _onClosed(RealtimeSocket socket) {
     if (!identical(socket, _socket)) return;
+    _pings?.cancel();
     _socket = null;
     _connected = null;
     if (socket.closeCode == 4401) _refreshToken = true;   // the sign-in expired: a fresh token next time
@@ -176,7 +214,9 @@ final class RealtimeConnection {
     if (_pending.isNotEmpty || _subscriptions.isNotEmpty || _lives.isNotEmpty || _joins.isNotEmpty) unawaited(_ensure().catchError((Object _) {}));
   }
 
-  void _onFrame(String text, Completer<void> welcomed) {
+  void _onFrame(RealtimeSocket socket, String text, Completer<void> welcomed) {
+    if (!identical(socket, _socket)) return;   // a socket let go: what it still says is no one's
+    _lastHeard = DateTime.now();
     final Map<String, dynamic> frame;
     try {
       frame = jsonDecode(text) as Map<String, dynamic>;

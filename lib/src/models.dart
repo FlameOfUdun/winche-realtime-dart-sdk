@@ -139,6 +139,8 @@ final class WincheRealtimeSettings {
     this.requestTimeout = const Duration(seconds: 30),
     this.initialBackoff = const Duration(milliseconds: 250),
     this.maxBackoff = const Duration(seconds: 30),
+    this.pingInterval = const Duration(seconds: 25),
+    this.pingTimeout = const Duration(seconds: 10),
   });
 
   /// How long a request waits for its answer, reconnects included, before failing with `unavailable`.
@@ -147,4 +149,9 @@ final class WincheRealtimeSettings {
   /// The first wait before reconnecting; doubled each failed try, up to [maxBackoff].
   final Duration initialBackoff;
   final Duration maxBackoff;
+
+  /// A connection quiet this long is pinged; one that stays quiet [pingTimeout] more is taken as dead (a network
+  /// switch can leave it half-open, never saying it's gone) and replaced.
+  final Duration pingInterval;
+  final Duration pingTimeout;
 }

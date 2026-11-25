@@ -41,7 +41,10 @@ await here.leave();
 - **Payloads** are bytes the server never reads (`RealtimeItem.json` for JSON).
 - **One connection per app**, made when first needed, as the signed-in user, with the app's Integrity token. It
   reconnects by itself (waiting longer each failed try), sends again what a drop cut off, and resumes every
-  subscription from the last position it delivered. When the sign-in expires, it reconnects with a fresh token.
+  subscription from the last position it delivered. When the sign-in expires, it reconnects with a fresh token. A
+  connection that goes quiet is pinged, and one that stays quiet (half-open after a network switch) is replaced.
+- **A request waits up to 30 s** (`WincheRealtimeSettings.requestTimeout`), reconnects included, then fails as
+  `unavailable`. An `append` that failed this way is safe to send again: its keys stop a second copy.
 - **After a reconnect** it listens and watches again, and joins again what you'd joined. Messages sent while it was
   disconnected are missed (channels keep nothing). A `publish` cut off by a drop fails as `unavailable`: it may or may
   not have gone out, and is never sent twice.
