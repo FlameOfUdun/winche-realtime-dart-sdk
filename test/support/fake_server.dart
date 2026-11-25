@@ -99,7 +99,8 @@ final class FakeRealtimeServer {
         final list = _lists[path];
         final after = (frame['after'] as int?) ?? 0;
         final limit = (frame['limit'] as int?) ?? 500;
-        return reply({'items': list == null ? <Map<String, dynamic>>[] : list.items.where((i) => (i['position'] as int) > after).take(limit).toList(), 'list': list?.info});
+        final rest = list == null ? <Map<String, dynamic>>[] : list.items.where((i) => (i['position'] as int) > after).toList();
+        return reply({'items': rest.take(limit).toList(), 'list': list?.info, 'more': rest.length > limit});
       case 'subscribe':
         final list = _lists[path];
         socket.subscriptions[id!] = _Sub(path!, (frame['after'] as int?) ?? 0, list?.state);

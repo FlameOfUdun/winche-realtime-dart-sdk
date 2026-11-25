@@ -18,7 +18,7 @@ list.subscribe(after: 0).listen((batch) {
 });
 
 // Read a page, close the list.
-final page = await list.read(after: 100, limit: 500);
+final page = await list.read(after: 100, limit: 500);   // page.more: read on after its last position (a page stops at about 1 MB)
 await list.close();
 ```
 

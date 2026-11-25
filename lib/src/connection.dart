@@ -48,26 +48,27 @@ final class RealtimeConnection {
   /// Who's connected at [path].
   RealtimePresenceRef presence(String path) => RealtimePresenceRef._(this, path);
 
-  /// Closes the connection; requests in progress fail, subscriptions end.
+  /// Closes the connection; requests in progress fail, subscriptions end. The socket goes first (out of presence at
+  /// once), and nothing waits on subscribers: one that's paused or busy doesn't hold it open.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _pings?.cancel();
+    final socket = _socket;
+    _socket = null;
+    _connected = null;
     for (final r in _pending.values) {
       r.fail(const WincheRealtimeException(WincheErrorCode.cancelled, 'The connection was closed.'));
     }
     _pending.clear();
-    for (final s in _subscriptions.values.toList()) {
-      await s.controller.close();
-    }
+    final controllers = [for (final s in _subscriptions.values) s.controller, for (final l in _lives.values) l.controller];
     _subscriptions.clear();
-    for (final l in _lives.values.toList()) {
-      await l.controller.close();
-    }
     _lives.clear();
     _joins.clear();
-    _pings?.cancel();
-    await _socket?.close();
-    _socket = null;
+    for (final c in controllers) {
+      c.close().ignore();
+    }
+    await socket?.close().catchError((Object _) {});
   }
 
   // ── requests ────────────────────────────────────────────────────────────────
@@ -215,7 +216,7 @@ final class RealtimeConnection {
   }
 
   void _onFrame(RealtimeSocket socket, String text, Completer<void> welcomed) {
-    if (!identical(socket, _socket)) return;   // a socket let go: what it still says is no one's
+    if (_disposed || !identical(socket, _socket)) return;   // a socket let go: what it still says is no one's
     _lastHeard = DateTime.now();
     final Map<String, dynamic> frame;
     try {
@@ -356,12 +357,13 @@ final class RealtimeListRef {
     return (result['positions'] as List).cast<int>();
   }
 
-  /// Up to [limit] items after position [after].
+  /// Up to [limit] items after position [after]; [RealtimePage.more] says whether to read on.
   Future<RealtimePage> read({int after = 0, int limit = 500}) async {
     final result = await _connection.request({'type': 'read', 'path': path, 'after': after, 'limit': limit});
     return RealtimePage(
       (result['items'] as List).cast<Map<String, dynamic>>().map(RealtimeEntry.fromWire).toList(),
       result['list'] == null ? null : RealtimeListInfo.fromWire(result['list'] as Map<String, dynamic>),
+      more: result['more'] == true,
     );
   }
 

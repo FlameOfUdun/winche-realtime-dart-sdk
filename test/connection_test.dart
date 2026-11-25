@@ -180,6 +180,30 @@ void main() {
     expect(server.dials, greaterThanOrEqualTo(3));   // the watcher dialled again
     await sub.cancel();
   });
+
+  test('a read says whether more items follow its page', () async {
+    final ann = connect().list('sessions/s1');
+    await ann.append([item('ann:1'), item('ann:2'), item('ann:3')]);
+    final first = await ann.read(limit: 2);
+    expect((first.items.length, first.more), (2, true));
+    final rest = await ann.read(after: first.items.last.position, limit: 2);
+    expect((rest.items.single.key, rest.more), ('ann:3', false));
+  });
+
+  test('dispose finishes at once with a paused subscriber, and nothing is thrown after', () async {
+    final errors = <Object>[];
+    await runZonedGuarded(() async {
+      final c = connect();
+      final sub = c.list('sessions/s1').subscribe().listen((_) {});
+      await c.list('sessions/s1').append([item('ann:1')]);
+      sub.pause();   // an app busy in its listener
+      await connect().list('sessions/s1').append([item('bob:1'), item('bob:2')]);
+      await c.dispose().timeout(const Duration(seconds: 1));
+      expect(server.open, 1);   // only the other connection: this one's socket is closed
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }, (e, _) => errors.add(e));
+    expect(errors, isEmpty);
+  });
 }
 
 Future<void> _until(bool Function() done, {Duration within = const Duration(seconds: 5)}) async {

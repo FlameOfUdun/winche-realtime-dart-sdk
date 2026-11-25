@@ -65,9 +65,13 @@ final class RealtimeListInfo {
 
 /// A page of a list: items after a position, and the list (null when there's none at the path).
 final class RealtimePage {
-  const RealtimePage(this.items, this.list);
+  const RealtimePage(this.items, this.list, {this.more = false});
   final List<RealtimeEntry> items;
   final RealtimeListInfo? list;
+
+  /// Whether items follow this page: read again after its last position while true. A page stops at its limit or
+  /// at the server's size budget (about 1 MB), so a short page isn't the end.
+  final bool more;
 }
 
 /// What a subscription delivers: new items in order (each position once), or the list's new state.
