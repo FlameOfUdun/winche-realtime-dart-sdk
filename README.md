@@ -15,6 +15,7 @@ await list.append([RealtimeItem.json('phone:1', {'event': 'start'})]);
 list.subscribe(after: 0).listen((batch) {
   for (final item in batch.items) apply(item.position, item.json);
   if (batch.state == 'closed') finish();
+  if (batch.state == 'deleted') reset();   // a list made at the path later is followed from position 1
 });
 
 // Read a page, close the list.

@@ -37,6 +37,10 @@ final class FakeRealtimeServer {
   Future<RealtimeSocket> connect(String? token) async {
     dials++;
     tokens.add(token);
+    if (refuseNextWith case final Object refusal) {
+      refuseNextWith = null;
+      throw refusal;
+    }
     final socket = FakeSocket(this)..uid = token;
     sockets.add(socket);
     if (closeBeforeWelcome > 0) {
@@ -44,7 +48,12 @@ final class FakeRealtimeServer {
       scheduleMicrotask(() => socket._drop(closeBeforeWelcomeCode));
       return socket;
     }
-    scheduleMicrotask(() => socket._send({'type': 'welcome', 'connectionId': 'c$dials'}));
+    final closeIt = closeAfterWelcome > 0;
+    if (closeIt) closeAfterWelcome--;
+    scheduleMicrotask(() {
+      socket._send({'type': 'welcome', 'connectionId': 'c$dials'});
+      if (closeIt) scheduleMicrotask(() => socket._drop(4408));
+    });
     return socket;
   }
 
@@ -183,11 +192,30 @@ final class FakeRealtimeServer {
     }
   }
 
+  /// Deletes a (closed) list, as the sweep or the console would: its followers are told, and start again at 1.
+  void deleteList(String path) {
+    _lists.remove(path);
+    _changed(path);
+  }
+
+  /// The next this many connections are closed right after their welcome (as a server that's draining would).
+  int closeAfterWelcome = 0;
+
+  /// The next connection attempt is refused with this HTTP status (e.g. 401: the token was refused), then cleared.
+  Object? refuseNextWith;
+
   void _deliver(FakeSocket socket, String id) {
     final sub = socket.subscriptions[id];
     if (sub == null) return;
     final list = _lists[sub.path];
-    if (list == null) return;
+    if (list == null) {
+      if (sub.state != null) {
+        sub.state = null;
+        sub.last = 0;
+        socket._send({'type': 'state', 'subscription': id, 'path': sub.path, 'state': 'deleted', 'count': 0});
+      }
+      return;
+    }
     final items = list.items.where((i) => (i['position'] as int) > sub.last).toList();
     if (items.isNotEmpty) {
       sub.last = items.last['position'] as int;

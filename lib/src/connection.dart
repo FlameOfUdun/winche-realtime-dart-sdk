@@ -7,6 +7,7 @@ import 'package:winche_core/winche_core.dart';
 
 import 'models.dart';
 import 'socket.dart';
+import 'web_socket_dial.dart' show refusedUpgradeStatus;
 
 /// Opens a socket into the server, signed in with [token] (null: signed out).
 typedef RealtimeConnector = Future<RealtimeSocket> Function(String? token);
@@ -29,7 +30,9 @@ final class RealtimeConnection {
   RealtimeSocket? _socket;
   Completer<void>? _connected;
   Timer? _pings;
-  DateTime _lastHeard = DateTime.now();
+  final _quiet = Stopwatch();   // since the socket last said anything (a clock, not the wall's time)
+  final _up = Stopwatch();      // since the socket was welcomed
+  Duration? _nextWait;          // before the next dial: the last connection didn't last
   bool _disposed = false;
   bool _refreshToken = false;
   int _next = 0;
@@ -68,7 +71,8 @@ final class RealtimeConnection {
     for (final c in controllers) {
       c.close().ignore();
     }
-    await socket?.close().catchError((Object _) {});
+    // Not waited on: a close that hangs (a half-open socket) mustn't hold up the next session.
+    if (socket != null) unawaited(socket.close().catchError((Object _) {}));
   }
 
   // ── requests ────────────────────────────────────────────────────────────────
@@ -119,8 +123,14 @@ final class RealtimeConnection {
   Future<void> _dial(Completer<void> connected) async {
     while (!_disposed) {
       try {
+        if (_nextWait case final wait?) {
+          _nextWait = null;
+          await Future<void>.delayed(wait);
+          if (_disposed) return;
+        }
         final token = await _token(forceRefresh: _refreshToken);
         _refreshToken = false;
+        if (_disposed) return;   // disposed while the token came: no dial
         final socket = await _connector(token);
         if (_disposed) {
           await socket.close();
@@ -145,15 +155,16 @@ final class RealtimeConnection {
           unawaited(socket.close().catchError((Object _) {}));
           rethrow;
         }
-        _backoff = null;
+        // The wait resets only once a connection has lasted (see _onClosed): one closed at once is redialled with backoff.
+        _up..reset()..start();
         connected.complete();
         _startPings(socket);
         _resume();
         return;
-      } catch (_) {
+      } catch (e) {
         if (_disposed) return;
-        final wait = _backoff = _backoff == null ? settings.initialBackoff : _min(_backoff! * 2, settings.maxBackoff);
-        await Future<void>.delayed(wait);
+        if (refusedUpgradeStatus(e) == 401) _refreshToken = true;   // the token was refused: a fresh one next try
+        await Future<void>.delayed(_grow());
       }
     }
   }
@@ -183,14 +194,17 @@ final class RealtimeConnection {
     }
   }
 
+  /// The next wait before dialling: [WincheRealtimeSettings.initialBackoff], doubled each time, up to the maximum.
+  Duration _grow() => _backoff = _backoff == null ? settings.initialBackoff : _min(_backoff! * 2, settings.maxBackoff);
+
   /// Pings a quiet connection; one that stays quiet is dropped (and replaced) as though it had closed.
   void _startPings(RealtimeSocket socket) {
     _pings?.cancel();
-    _lastHeard = DateTime.now();
+    _quiet..reset()..start();
     final tick = settings.pingTimeout ~/ 2;
     _pings = Timer.periodic(tick > Duration.zero ? tick : const Duration(milliseconds: 1), (timer) {
       if (!identical(socket, _socket)) return timer.cancel();
-      final quiet = DateTime.now().difference(_lastHeard);
+      final quiet = _quiet.elapsed;
       if (quiet > settings.pingInterval + settings.pingTimeout) {
         timer.cancel();
         _onClosed(socket);
@@ -205,6 +219,12 @@ final class RealtimeConnection {
     if (!identical(socket, _socket)) return;
     _pings?.cancel();
     _socket = null;
+    // A connection that lasted a while resets the wait; one that closed soon after its welcome waits longer next time.
+    if (_up.elapsed >= const Duration(seconds: 10)) {
+      _backoff = null;
+    } else {
+      _nextWait = _grow();
+    }
     _connected = null;
     if (socket.closeCode == 4401) _refreshToken = true;   // the sign-in expired: a fresh token next time
     // A message cut off may have gone out or not, and has no key to stop a second copy: it fails, never resent.
@@ -217,7 +237,7 @@ final class RealtimeConnection {
 
   void _onFrame(RealtimeSocket socket, String text, Completer<void> welcomed) {
     if (_disposed || !identical(socket, _socket)) return;   // a socket let go: what it still says is no one's
-    _lastHeard = DateTime.now();
+    _quiet..reset()..start();
     final Map<String, dynamic> frame;
     try {
       frame = jsonDecode(text) as Map<String, dynamic>;
@@ -259,16 +279,25 @@ final class RealtimeConnection {
         final state = frame['state'] as String?;
         if (s == null || state == null || state == s.state) return;
         s.state = state;
+        // Deleted: a list made at the path later starts again at position 1.
+        if (state == 'deleted') s.last = 0;
         s.controller.add(RealtimeBatch(state: state));
     }
   }
 
   // ── subscriptions ───────────────────────────────────────────────────────────
 
+  /// A stream listened to after the connection was closed: it says so and ends.
+  void _ended(StreamController<Object?> controller) {
+    controller.addError(const WincheRealtimeException(WincheErrorCode.cancelled, 'The connection was closed.'));
+    controller.close().ignore();
+  }
+
   Stream<RealtimeBatch> _stream(String path, int after) {
     late final _Subscription s;
     final controller = StreamController<RealtimeBatch>(
       onListen: () {
+        if (_disposed) return _ended(s.controller);
         _subscriptions[s.local] = s;
         _subscribe(s);
       },
@@ -290,6 +319,7 @@ final class RealtimeConnection {
     late final _Live live;
     final controller = StreamController<T>(
       onListen: () {
+        if (_disposed) return _ended(live.controller);
         _lives[live.local] = live;
         _startLive(live);
       },

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show WebSocketException;
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
@@ -203,6 +204,59 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }, (e, _) => errors.add(e));
     expect(errors, isEmpty);
+  });
+
+  test('a subscription made before dispose but listened to after it ends with cancelled', () async {
+    final c = connect();
+    final stream = c.list('sessions/s1').subscribe();
+    await c.dispose();
+    await expectLater(stream, emitsError(isA<WincheRealtimeException>().having((e) => e.code, 'code', WincheErrorCode.cancelled)));
+  });
+
+  test('a token asked for while disposing never dials', () async {
+    final gate = Completer<String?>();
+    final c = connect(token: ({bool forceRefresh = false}) => gate.future);
+    c.list('sessions/s1').append([item('ann:1')]).ignore();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await c.dispose();
+    gate.complete('token');
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(server.dials, 0);
+  });
+
+  test('a list deleted under a subscription: told, and a new list there is followed from 1', () async {
+    final ann = connect();
+    final batches = <RealtimeBatch>[];
+    final sub = ann.list('sessions/s1').subscribe().listen(batches.add);
+    await ann.list('sessions/s1').append([item('ann:1'), item('ann:2')]);
+    await ann.list('sessions/s1').close();
+    await _until(() => batches.any((b) => b.state == 'closed'));
+    server.deleteList('sessions/s1');
+    await _until(() => batches.any((b) => b.state == 'deleted'));
+    await ann.list('sessions/s1').append([item('ann:new')]);
+    await _until(() => batches.any((b) => b.items.any((e) => e.key == 'ann:new')));
+    expect(batches.expand((b) => b.items).last.position, 1);
+    await sub.cancel();
+  });
+
+  test('a server that welcomes then closes at once is redialled with growing waits', () async {
+    server.closeAfterWelcome = 1000;
+    final c = connect(settings: const WincheRealtimeSettings(initialBackoff: Duration(milliseconds: 40), maxBackoff: Duration(seconds: 5)));
+    final sub = c.list('sessions/s1').subscribe().listen((_) {});
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    expect(server.dials, lessThanOrEqualTo(5));   // 40 + 80 + 160 ms...: not a dial every few milliseconds
+    await sub.cancel();
+  });
+
+  test('a refused token (401 on the upgrade) is refreshed before the next try', () async {
+    final asked = <bool>[];
+    server.refuseNextWith = WebSocketException('refused', 401);
+    final c = connect(token: ({bool forceRefresh = false}) async {
+      asked.add(forceRefresh);
+      return 'token';
+    });
+    await c.list('sessions/s1').append([item('ann:1')]);
+    expect(asked, [false, true]);
   });
 }
 

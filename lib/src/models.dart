@@ -79,7 +79,8 @@ final class RealtimeBatch {
   const RealtimeBatch({this.items = const [], this.state});
   final List<RealtimeEntry> items;
 
-  /// Set when the list opened or closed.
+  /// Set when the list opened or closed, or `deleted` when it was deleted (a list made at the path later is followed
+  /// from position 1).
   final String? state;
 }
 
