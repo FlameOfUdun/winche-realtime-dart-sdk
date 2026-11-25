@@ -1,3 +1,11 @@
+## 0.1.1
+
+- `RealtimePage.more`: whether to read on after a page (pages stop at about 1 MB).
+- A list deleted under a subscription is reported (`state: deleted`); a list made at the path later is followed from position 1.
+- Sign-out never waits on a paused subscriber or on the socket's close; streams listened to after it end with `cancelled`.
+- A connection that drops before the server's welcome is let go (no hidden second connection); quiet connections are pinged and replaced when half-open.
+- A server that closes right after its welcome is redialled with backoff; a 401 on the upgrade refreshes the token.
+
 ## 0.1.0
 
 - `WincheRealtime.instance.list(path)`: `append` (all or none, retries never duplicate), `subscribe(after:)` (each
