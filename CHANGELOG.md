@@ -1,3 +1,7 @@
+## 0.1.3
+
+- A reconnect delay counts from the drop: a request made after it has passed dials at once.
+
 ## 0.1.2
 
 - Needs winche_core 1.1.1: its error messages never carry a signed link's signature, a token or a password.

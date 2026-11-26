@@ -258,6 +258,16 @@ void main() {
     await c.list('sessions/s1').append([item('ann:1')]);
     expect(asked, [false, true]);
   });
+
+  test('a reconnect delay that has passed by the time of the next request is not waited again', () async {
+    final c = connect(settings: const WincheRealtimeSettings(initialBackoff: Duration(milliseconds: 300), maxBackoff: Duration(seconds: 1)));
+    await c.list('sessions/s1').append([item('ann:1')]);
+    server.dropAll();   // a drop soon after connecting, nothing pending: the next dial would wait…
+    await Future<void>.delayed(const Duration(milliseconds: 900));   // …but that wait is over by now
+    final clock = Stopwatch()..start();
+    await c.list('sessions/s1').append([item('ann:2')]);
+    expect(clock.elapsed, lessThan(const Duration(milliseconds: 250)));
+  });
 }
 
 Future<void> _until(bool Function() done, {Duration within = const Duration(seconds: 5)}) async {

@@ -33,6 +33,7 @@ final class RealtimeConnection {
   final _quiet = Stopwatch();   // since the socket last said anything (a clock, not the wall's time)
   final _up = Stopwatch();      // since the socket was welcomed
   Duration? _nextWait;          // before the next dial: the last connection didn't last
+  final _sinceDrop = Stopwatch(); // since that connection dropped: the wait counts from then
   bool _disposed = false;
   bool _refreshToken = false;
   int _next = 0;
@@ -125,7 +126,9 @@ final class RealtimeConnection {
       try {
         if (_nextWait case final wait?) {
           _nextWait = null;
-          await Future<void>.delayed(wait);
+          // Only what's left of it: a request much later than the drop dials at once.
+          final left = wait - _sinceDrop.elapsed;
+          if (left > Duration.zero) await Future<void>.delayed(left);
           if (_disposed) return;
         }
         final token = await _token(forceRefresh: _refreshToken);
@@ -224,6 +227,7 @@ final class RealtimeConnection {
       _backoff = null;
     } else {
       _nextWait = _grow();
+      _sinceDrop..reset()..start();
     }
     _connected = null;
     if (socket.closeCode == 4401) _refreshToken = true;   // the sign-in expired: a fresh token next time
