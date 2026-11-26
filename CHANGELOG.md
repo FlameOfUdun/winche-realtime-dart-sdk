@@ -1,3 +1,7 @@
+## 0.1.2
+
+- Needs winche_core 1.1.1: its error messages never carry a signed link's signature, a token or a password.
+
 ## 0.1.1
 
 - `RealtimePage.more`: whether to read on after a page (pages stop at about 1 MB).
